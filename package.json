@@ -1,5 +1,5 @@
 {
-  "name": "@drex-api/bot",
+  "name": "@trashcore/drex-api",
   "version": "1.0.0",
   "description": "Write a DrexChat bot in JavaScript and run it anywhere. Long polling, zero dependencies.",
   "main": "index.js",
