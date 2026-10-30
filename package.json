@@ -5,7 +5,7 @@
   "main": "index.js",
   "types": "index.d.ts",
   "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
-  "engines": { "node": ">=14" },
+  "engines": { "node": ">=22" },
   "keywords": ["drexchat", "bot", "chatbot", "messaging", "long-polling"],
   "license": "MIT",
   "publishConfig": { "access": "public" }
