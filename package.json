@@ -1,0 +1,12 @@
+{
+  "name": "@drex-api/bot",
+  "version": "1.0.0",
+  "description": "Write a DrexChat bot in JavaScript and run it anywhere. Long polling, zero dependencies.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
+  "engines": { "node": ">=14" },
+  "keywords": ["drexchat", "bot", "chatbot", "messaging", "long-polling"],
+  "license": "MIT",
+  "publishConfig": { "access": "public" }
+}
