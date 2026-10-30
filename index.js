@@ -70,12 +70,13 @@ class Bot {
     this.running = false;
     this.handlers = new Map();
     this.commands = new Map();
+    this.actions = [];
     this._backoff = BACKOFF_START_MS;
   }
 
   /* ------------------------------------------------------------------ events */
 
-  /** Registers a handler for an event. Only 'message' and 'ready' are emitted today. */
+  /** Registers a handler for an event: 'message', 'callback' (an unmatched button tap) or 'ready'. */
   on(event, handler) {
     if (typeof handler !== 'function') throw new Error('A handler function is required');
     const key = String(event);
@@ -207,15 +208,15 @@ class Bot {
    * A bot may only speak where it has been added — the server refuses anything else — so a leaked
    * token cannot be used to message strangers.
    */
-  sendMessage(chatId, text) {
+  sendMessage(chatId, text, options) {
     if (!chatId) return Promise.reject(new Error('chatId is required'));
     if (text == null || String(text).trim() === '') {
       return Promise.reject(new Error('text is required'));
     }
-    return this._request('/api/bot/send', {
-      method: 'POST',
-      body: { chatId, text: String(text) }
-    });
+    const body = { chatId, text: String(text) };
+    const buttons = toButtons(options && options.buttons);
+    if (buttons) body.buttons = buttons;
+    return this._request('/api/bot/send', { method: 'POST', body });
   }
 
   /**
@@ -225,20 +226,56 @@ class Bot {
    * rather than handed to the WebView. `caption` becomes the message text, so a menu can be one
    * message: the picture with its list of commands.
    */
-  sendPhoto(chatId, url, caption) {
+  sendPhoto(chatId, url, caption, options) {
+    return this.sendMedia(chatId, url, 'image', caption, options);
+  }
+
+  /** Sends a video the app plays inline. The address must be a direct http(s) link to the file. */
+  sendVideo(chatId, url, caption, options) {
+    return this.sendMedia(chatId, url, 'video', caption, options);
+  }
+
+  /** Sends audio the app plays inline, with a player. */
+  sendAudio(chatId, url, caption, options) {
+    return this.sendMedia(chatId, url, 'audio', caption, options);
+  }
+
+  /**
+   * The one place a media message is built; sendPhoto, sendVideo and sendAudio are this with a type.
+   *
+   * `type` may be 'image', 'video' or 'audio'. Pass null to let the server decide from the file
+   * extension. `options.buttons` attaches buttons under the media, the same way as for text.
+   */
+  sendMedia(chatId, url, type, caption, options) {
     if (!chatId) return Promise.reject(new Error('chatId is required'));
     if (!url || !/^https?:\/\//i.test(String(url))) {
-      return Promise.reject(new Error('A photo needs an http or https url'));
+      return Promise.reject(new Error('Media needs an http or https url'));
     }
-    return this._request('/api/bot/send', {
-      method: 'POST',
-      body: {
-        chatId,
-        text: caption == null ? '' : String(caption),
-        mediaUrl: String(url),
-        mediaType: 'image'
-      }
-    });
+    const body = {
+      chatId,
+      text: caption == null ? '' : String(caption),
+      mediaUrl: String(url)
+    };
+    if (type) body.mediaType = String(type);
+    const buttons = toButtons(options && options.buttons);
+    if (buttons) body.buttons = buttons;
+    return this._request('/api/bot/send', { method: 'POST', body });
+  }
+
+  /**
+   * Registers a handler for a tapped button.
+   *
+   * `pattern` is the exact `data` of the button, or a RegExp. With a RegExp the match is on
+   * ctx.match, so one handler can serve a family: bot.action(/^page:(\d+)$/, ...).
+   * A tap that matches nothing here is emitted as a 'callback' event instead.
+   */
+  action(pattern, handler) {
+    if (typeof handler !== 'function') throw new Error('A handler function is required');
+    if (typeof pattern !== 'string' && !(pattern instanceof RegExp)) {
+      throw new Error('An action needs a string or a RegExp');
+    }
+    this.actions.push({ pattern, handler });
+    return this;
   }
 
   /* ------------------------------------------------------------------ polling */
@@ -341,12 +378,43 @@ class Bot {
       messageId: update && update.message_id != null ? update.message_id : null,
       date: (update && update.date) || null,
       bot: this,
-      reply: (replyText) => this.sendMessage(chatId, replyText),
-      replyWithPhoto: (url, caption) => this.sendPhoto(chatId, url, caption),
+      reply: (replyText, options) => this.sendMessage(chatId, replyText, options),
+      replyWithPhoto: (url, caption, options) => this.sendPhoto(chatId, url, caption, options),
+      replyWithVideo: (url, caption, options) => this.sendVideo(chatId, url, caption, options),
+      replyWithAudio: (url, caption, options) => this.sendAudio(chatId, url, caption, options),
+      // Set for a button tap; null for an ordinary message.
+      data: update && update.type === 'callback' ? String(update.data == null ? '' : update.data) : null,
+      isCallback: Boolean(update && update.type === 'callback'),
+      match: null,
       // When the server handed this update over. Comparing it with the clock inside a handler shows
       // how long the bot took to get to it, which is the useful half of a ?ping.
       receivedAt
     };
+
+    if (ctx.isCallback) {
+      for (const action of this.actions) {
+        let match = null;
+        if (typeof action.pattern === 'string') {
+          if (action.pattern === ctx.data) match = [ctx.data];
+        } else {
+          match = action.pattern.exec(ctx.data);
+        }
+        if (!match) continue;
+        ctx.match = match;
+        try {
+          const result = action.handler(ctx);
+          if (result && typeof result.catch === 'function') {
+            result.catch((error) => this._log('action failed', error.message));
+          }
+        } catch (error) {
+          this._log('action failed', error.message);
+        }
+        return;
+      }
+      // Nothing claimed it. Never fall through to the message handler: a tap is not text.
+      this._emit('callback', ctx);
+      return;
+    }
 
     const name = commandName(text);
     const handler = name ? this.commands.get(name) : null;
@@ -406,10 +474,44 @@ function tokenProblem(error) {
   );
 }
 
+/**
+ * Buttons in the shape the server takes: rows of { text, data } or { text, url }.
+ *
+ * Accepts a flat array (one row) or an array of rows, so `[btn('A','a'), btn('B','b')]` and
+ * `[[btn('A','a')], [btn('B','b')]]` both do what they look like. Mistakes throw here, in the bot's
+ * own stack trace, rather than coming back as a 400 from the server.
+ */
+function toButtons(input) {
+  if (input == null || (Array.isArray(input) && input.length === 0)) return null;
+  if (!Array.isArray(input)) throw new Error('buttons must be an array');
+  const rows = Array.isArray(input[0]) ? input : [input];
+  return rows.map((row) => {
+    if (!Array.isArray(row)) throw new Error('every row of buttons must be an array');
+    return row.map((item) => {
+      if (!item || typeof item.text !== 'string' || !item.text.trim()) {
+        throw new Error('a button needs text');
+      }
+      if (item.url != null) return { text: item.text, url: String(item.url) };
+      if (item.data == null || String(item.data) === '') throw new Error('a button needs data or a url');
+      return { text: item.text, data: String(item.data) };
+    });
+  });
+}
+
+/** A button that sends `data` back to the bot when tapped. At most 64 bytes of data. */
+function button(text, data) {
+  return { text: String(text), data: String(data) };
+}
+
+/** A button that opens a link instead of calling the bot. */
+function urlButton(text, url) {
+  return { text: String(text), url: String(url) };
+}
+
 function clampPoll(seconds) {
   const value = Number(seconds);
   if (!Number.isFinite(value)) return DEFAULT_POLL_SECONDS;
   return Math.min(Math.max(Math.floor(value), 0), 50);
 }
 
-module.exports = { Bot, commandName, DEFAULT_BASE_URL };
+module.exports = { Bot, commandName, button, urlButton, DEFAULT_BASE_URL };
