@@ -3,7 +3,7 @@
 Write a DrexChat bot in plain JavaScript. Long polling: no public address, no certificate, no dependencies.
 
 ```js
-const { Bot } = require('@drex-api/bot');
+const { Bot } = require('@trashcore/drex-api');
 
 const bot = new Bot({ token: process.env.DREX_BOT_TOKEN, ownerId: Number(process.env.DREX_OWNER_ID) });
 
